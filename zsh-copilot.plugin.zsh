@@ -1,36 +1,47 @@
+# ZSH Copilot Script for Ollama
+
 (( ! ${+ZSH_COPILOT_KEY} )) &&
     typeset -g ZSH_COPILOT_KEY='^z'
 
 (( ! ${+ZSH_COPILOT_SEND_CONTEXT} )) &&
     typeset -g ZSH_COPILOT_SEND_CONTEXT=true
 
-# (( ! ${+ZSH_COPILOT_SEND_GIT_DIFF} )) &&
-#     typeset -g ZSH_COPILOT_SEND_GIT_DIFF=true
-
 (( ! ${+ZSH_COPILOT_DEBUG} )) &&
     typeset -g ZSH_COPILOT_DEBUG=false
 
+(( ! ${+ZSH_COPILOT_OLLAMA_MODEL} )) &&
+    typeset -g ZSH_COPILOT_OLLAMA_MODEL='llama3.1:8b'
+
 read -r -d '' SYSTEM_PROMPT <<- EOM
-  You will be given the raw input of a shell command. 
-  Your task is to either complete the command or provide a new command that you think the user is trying to type. 
-  If you return a completely new command for the user, prefix is with an equal sign (=). 
-  If you return a completion for the user's command, prefix it with a plus sign (+). 
-  MAKE SURE TO ONLY INCLUDE THE REST OF THE COMPLETION!!! 
-  Do not write any leading or trailing characters except if required for the completion to work. 
-  Only respond with either a completion or a new command, not both. 
-  Your response may only start with either a plus sign or an equal sign.
-  Your response MAY NOT start with both! This means that your response IS NOT ALLOWED to start with '+=' or '=+'.
-  You MAY explain the command by writing a short line after the comment symbol (#).
-  Do not ask for more information, you won't receive it. 
-  Your response will be run in the user's shell. 
-  Make sure input is escaped correctly if needed so. 
-  Your input should be able to run without any modifications to it.
-  Don't you dare to return anything else other than a shell command!!! 
-  DO NOT INTERACT WITH THE USER IN NATURAL LANGUAGE! If you do, you will be banned from the system. 
-  Note that the double quote sign is escaped. Keep this in mind when you create quotes. 
-  Here are two examples: 
-    * User input: 'list files in current directory'; Your response: '=ls # ls is the builtin command for listing files' 
-    * User input: 'cd /tm'; Your response: '+p # /tmp is the standard temp folder on linux and mac'.
+You are a shell command assistant. Given the raw input of a shell command, your task is to:
+
+1. Complete the command with relevant options or arguments, OR
+2. Provide a new command that you think the user is trying to type.
+
+Rules:
+- If returning a completely new command, prefix it with an equal sign (=).
+- If returning a completion for the user's command, prefix it with a plus sign (+).
+- For completions, ONLY INCLUDE THE REST OF THE COMPLETION. Do not repeat what the user has already typed.
+- Do not write any leading or trailing characters except if required for the completion to work.
+- Your response MUST start with either a plus sign (+) or an equal sign (=), but NEVER both.
+- You MAY explain the command by writing a short line after the comment symbol (#).
+- Do not ask for more information; you won't receive it.
+- Ensure the command or completion can run in the user's shell without modifications.
+- Make sure to escape input correctly if needed.
+- DO NOT RETURN ANYTHING OTHER THAN A SHELL COMMAND OR COMPLETION.
+- DO NOT INTERACT WITH THE USER IN NATURAL LANGUAGE.
+
+Examples:
+User input: 'list files in current directory'
+Your response: '=ls -la # List all files, including hidden ones, with details'
+
+User input: 'cd /tm'
+Your response: '+p # /tmp is the standard temp folder on Linux and macOS'
+
+User input: 'grep "error" log'
+Your response: '+ -i # Case-insensitive search'
+
+Remember, your response will be directly used or executed in the shell, so ensure it's correct and safe.
 EOM
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -40,8 +51,6 @@ else
 fi
 
 function _suggest_ai() {
-    local OPENAI_API_URL=${OPENAI_API_URL:-"api.openai.com"}
-
     if [[ "$ZSH_COPILOT_SEND_CONTEXT" == 'true' ]]; then
         local PROMPT="$SYSTEM_PROMPT 
             Context: You are user $(whoami) with id $(id) in directory $(pwd). 
@@ -56,58 +65,67 @@ function _suggest_ai() {
     zle -R "Thinking..."
 
     PROMPT=$(echo "$PROMPT" | tr -d '\n')
-    # Wasn't able to get this to work :(
-    # if [[ "$ZSH_COPILOT_SEND_GIT_DIFF" == 'true' ]]; then
-    #     if [[ $(git rev-parse --is-inside-work-tree) == 'true' ]]; then
-    #         local git_diff=$(git diff --staged --no-color)
-    #         local git_exit_code=$?
-    #         git_diff=$(echo "$git_diff" | tr '\\' ' ' | sed 's/[\$\"\`]/\\&/g' | tr '\\' '\\\\' | tr -d '\n')
-    #
-    #         if [[ git_exit_code -eq 0 ]]; then
-    #             PROMPT="$PROMPT; This is the git diff: <---->$git_diff<----> You may provide a git commit message if the user is trying to commit changes. You are an expert at committing changes, you don't give generic messages. You give the best commit messages"
-    #         fi
-    #     fi
-    # fi
 
     local data="{
-            \"model\": \"gpt-4\",
-            \"messages\": [
-                {
-                    \"role\": \"system\",
-                    \"content\": \"$PROMPT\"
-                },
-                {
-                    \"role\": \"user\",
-                    \"content\": \"$input\"
-                }
-            ]
+            \"model\": \"$ZSH_COPILOT_OLLAMA_MODEL\",
+            \"prompt\": \"$PROMPT\n\nUser: $input\",
+            \"stream\": false
         }"
-    local response=$(curl "https://${OPENAI_API_URL}/v1/chat/completions" \
+    local response=$(curl "http://localhost:11434/api/generate" \
         --silent \
         -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $OPENAI_API_KEY" \
-        -d $data)
-    local message=$(echo "$response" | jq -r '.choices[0].message.content')
-
-    # zle -U "$suggestion"
-
-    local first_char=${message:0:1}
-    local suggestion=${message:1:${#message}}
+        -d "$data")
     
     if [[ "$ZSH_COPILOT_DEBUG" == 'true' ]]; then
-        touch /tmp/zsh-copilot.log
-        echo "$(date);INPUT:$input;RESPONSE:$response;FIRST_CHAR:$first_char;SUGGESTION:$suggestion:DATA:$data" >> /tmp/zsh-copilot.log
+        echo "Debug: Full response from Ollama: $response" >> /tmp/zsh-copilot.log
+    fi
+
+    if [[ -z "$response" ]]; then
+        echo "Error: No response from Ollama. Is it running?" >&2
+        return 1
+    fi
+
+    local message
+    if command -v jq >/dev/null 2>&1; then
+        message=$(echo "$response" | jq -r '.response // empty')
+    else
+        message=$(echo "$response" | grep -o '"response":"[^"]*' | sed 's/"response":"//;s/"$//')
+    fi
+
+    if [[ -z "$message" ]]; then
+        echo "Error: Unable to extract response from Ollama output." >&2
+        echo "Raw response: $response" >&2
+        return 1
+    fi
+
+    # Nettoyage et validation de la réponse
+    message=$(echo "$message" | sed "s/^[\"']//;s/[\"']$//;s/^[[:space:]]*//;s/[[:space:]]*$//")
+    local first_char=${message:0:1}
+    local suggestion=${message:1}
+
+    if [[ "$first_char" != '+' && "$first_char" != '=' ]]; then
+        # Si le format n'est pas respecté, on traite tout comme une nouvelle commande
+        first_char='='
+        suggestion=$message
+    fi
+
+    if [[ "$ZSH_COPILOT_DEBUG" == 'true' ]]; then
+        echo "Debug: Cleaned message: $message" >> /tmp/zsh-copilot.log
+        echo "Debug: First char: $first_char" >> /tmp/zsh-copilot.log
+        echo "Debug: Suggestion: $suggestion" >> /tmp/zsh-copilot.log
     fi
 
     if [[ "$first_char" == '=' ]]; then
-        # Reset user input
-        BUFFER=""
-        CURSOR=0
-
-        zle -U "$suggestion"
+        # Nouvelle commande : remplacer le buffer actuel
+        BUFFER="$suggestion"
+        CURSOR=${#BUFFER}
     elif [[ "$first_char" == '+' ]]; then
-        _zsh_autosuggest_suggest "$suggestion"
-         # POSTDISPLAY="$suggestion"
+        # Complétion : utiliser zsh-autosuggestions
+        local new_buffer="${BUFFER}${suggestion}"
+        _zsh_autosuggest_suggest "$new_buffer"
+    else
+        echo "Error: Invalid response format from Ollama" >&2
+        return 1
     fi
 }
 
@@ -117,9 +135,8 @@ function zsh-copilot() {
     echo "Configurations:"
     echo "    - ZSH_COPILOT_KEY: Key to press to get suggestions (default: ^z, value: $ZSH_COPILOT_KEY)."
     echo "    - ZSH_COPILOT_SEND_CONTEXT: If \`true\`, zsh-copilot will send context information (whoami, shell, pwd, etc.) to the AI model (default: true, value: $ZSH_COPILOT_SEND_CONTEXT)."
-    # echo "    - ZSH_COPILOT_SEND_GIT_DIFF: If \`true\`, zsh-copilot will send the git diff (if available) to the AI model (default: true, value: $ZSH_COPILOT_SEND_GIT_DIFF)."
+    echo "    - ZSH_COPILOT_OLLAMA_MODEL: The Ollama model to use (default: llama3.1:8b, value: $ZSH_COPILOT_OLLAMA_MODEL)."
 }
 
 zle -N _suggest_ai
 bindkey $ZSH_COPILOT_KEY _suggest_ai
-
